@@ -41,10 +41,19 @@
 
 #include <QEventLoop>
 
+#include <QProcess>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QTimer>
+#include <functional>
+
 #include <pwd.h>
 #include <grp.h>
 
 #include <config-runtime.h>
+#include "wsdiscoverer.h"
+#include "dnssddiscoverer.h"
 
 using namespace KIO;
 
@@ -363,6 +372,7 @@ void SMBSlave::listDir( const QUrl& kurl )
 
            qCDebug(KIO_SMB) << "dirp->name " <<  dirp->name  << " " << dirpName << " '" << comment << "'" << " " << dirp->smbc_type;
 
+
            udsentry.fastInsert( KIO::UDSEntry::UDS_NAME, udsName );
 
            // Mark all administrative shares, e.g ADMIN$, as hidden. #197903
@@ -458,15 +468,83 @@ void SMBSlave::listDir( const QUrl& kurl )
            udsentry.clear();
        } while (dirp); // checked already in the head
 
-       listDNSSD(udsentry, url, direntCount);
+       qDebug() << "after list";
+
+       // This entire method act as fallback logic iff SMB discovery is not working
+       // (for example when using a protocol version that doesn't have discovery).
+       // As such we can return if entries were discovered or the URL is not '/'
+       auto normalizedUrl = url.adjusted(QUrl::NormalizePathSegments);
+       qDebug() << "CHECKING DNSSD" << (direntCount <= 0) << "&&" << normalizedUrl.path().isEmpty();
+       if (direntCount <= 0 && normalizedUrl.path().isEmpty()) {
+           qDebug() << "Trying modern discovery (dnssd/wsdiscovery)";
+
+           QEventLoop e;
+
+           UDSEntryList list;
+
+           // Since slavebase has no eventloop it wont publish results
+           // on a timer, since we do not know how long our discovery
+           // will take this is super meh because we may appear
+           // stuck for a while. Implement our own listing system
+           // based on QTimer to mitigate.
+           QTimer sendTimer;
+           sendTimer.setInterval(300);
+           connect(&sendTimer, &QTimer::timeout, this, [&] {
+               if (list.size() < 1) {
+                   return;
+               }
+               listEntries(list);
+               list.clear();
+           });
+           sendTimer.start();
+
+           auto enterDiscovery = [&](Discovery::Ptr discovery) {
+               discovery->toEntry(udsentry);
+               list.append(udsentry);
+               udsentry.clear();
+           };
+
+           DNSSDDiscoverer d;
+           WSDiscoverer w;
+
+           QList<Discoverer *> discoverers {&d, &w};
+
+           auto maybeFinished = [&] {
+               bool allFinished = true;
+               for (auto discoverer : discoverers) {
+                   if (discoverer->isFinished()) {
+                       discoverer->stop();
+                   }
+                   allFinished &= discoverer->isFinished();
+               }
+               if (allFinished) {
+                   qDebug() << "FINISH";
+                   e.quit();
+               }
+           };
+
+           connect(&d, &DNSSDDiscoverer::newDiscovery, this, enterDiscovery);
+           connect(&w, &WSDiscoverer::newDiscovery, this, enterDiscovery);
+
+           connect(&d, &DNSSDDiscoverer::finished, this, maybeFinished);
+           connect(&w, &WSDiscoverer::finished, this, maybeFinished);
+
+           d.start();
+           w.start();
+
+           QTimer::singleShot(16000, &e, &QEventLoop::quit);
+           e.exec();
+       }
 
        if (dir_is_root) {
+           qDebug() << "dir is root";
            udsentry.fastInsert(KIO::UDSEntry::UDS_FILE_TYPE, S_IFDIR);
            udsentry.fastInsert(KIO::UDSEntry::UDS_NAME, ".");
            udsentry.fastInsert(KIO::UDSEntry::UDS_ACCESS, (S_IRUSR | S_IRGRP | S_IROTH | S_IXUSR | S_IXGRP | S_IXOTH));
        }
        else
        {
+           qDebug() << "dir is not root";
            udsentry.fastInsert(KIO::UDSEntry::UDS_NAME, ".");
            const int statErr = browse_stat_path(m_current_url, udsentry);
            if (statErr)
@@ -510,14 +588,6 @@ void SMBSlave::listDNSSD(UDSEntry &udsentry, const QUrl &url, const uint direntC
 #ifndef HAVE_KDNSSD_WITH_SIGNAL_RACE_PROTECTION
     return;
 #endif // HAVE_KDNSSD_WITH_SIGNAL_RACE_PROTECTION
-
-    // This entire method act as fallback logic iff SMB discovery is not working
-    // (for example when using a protocol version that doesn't have discovery).
-    // As such we can return if entries were discovered or the URL is not '/'
-    auto normalizedUrl = url.adjusted(QUrl::NormalizePathSegments);
-    if (direntCount > 0 || !normalizedUrl.path().isEmpty()) {
-        return;
-    }
 
     // Slaves have no event loop, start one for the poll.
     // KDNSSD has an internal timeout which may trigger if this takes too long
@@ -584,6 +654,8 @@ void SMBSlave::listDNSSD(UDSEntry &udsentry, const QUrl &url, const uint direntC
 
         udsentry.fastInsert(KIO::UDSEntry::UDS_FILE_TYPE, S_IFDIR);
         udsentry.fastInsert(KIO::UDSEntry::UDS_ACCESS, (S_IRUSR | S_IXUSR | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH));
+        udsentry.fastInsert(KIO::UDSEntry::UDS_ICON_NAME, "network-server");
+        udsentry.fastInsert(KIO::UDSEntry::UDS_ICON_OVERLAY_NAMES, "/home/me/avahi.png");
 
         // TODO: it may be better to resolve the host to an ip address. dnssd
         //   being able to find a service doesn't mean name resolution is

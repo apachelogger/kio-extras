@@ -1,3 +1,5 @@
+add_subdirectory(kdsoap-ws-discovery-client)
+
 add_feature_info("SMB DNS-SD Discovery" HAVE_KDNSSD_WITH_SIGNAL_RACE_PROTECTION
     "Discover SMB hosts via DNS-SD/Avahi/Bonjour. KF5DNSSD >= 5.54 is required to support this.")
 
@@ -19,7 +21,11 @@ set(kio_smb_PART_SRCS
    kio_smb_dir.cpp 
    kio_smb_file.cpp 
    kio_smb_internal.cpp 
-   kio_smb_mount.cpp )
+   kio_smb_mount.cpp
+   wsdiscoverer.cpp
+   dnssddiscoverer.cpp
+   discovery.cpp
+)
 
 include_directories(${SAMBA_INCLUDE_DIR})
 
@@ -30,7 +36,9 @@ target_link_libraries(kio_smb
     KF5::I18n
     ${SAMBA_LIBRARIES}
     Qt5::Network
-    KF5::DNSSD)
+    KF5::DNSSD
+    KDSoap::WSDiscoveryClient
+)
 else()
 set(kio_smb_PART_SRCS 
    kio_smb_win.cpp)
